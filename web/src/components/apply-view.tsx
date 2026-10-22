@@ -229,7 +229,7 @@ export function ApplyView() {
               <CheckCircle2 className="mt-0.5 size-5 shrink-0 text-emerald-500" />
               <div>
                 <span className="font-medium text-emerald-700 dark:text-emerald-400">The real form is now in front, pre-filled.</span>{" "}
-                <span className="text-muted">Review it and click Submit yourself — career-ops never submits for you.</span>
+                <span className="text-muted">Review it in the Chrome window career-ops opened and click Submit yourself — it stays open even if you leave this page. Don't reopen the job link; that starts a blank form.</span>
               </div>
             </div>
           )}
