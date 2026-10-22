@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/PrathameshTawar/ops-/compare/web-v0.9.0...web-v0.10.0) (2026-10-22)
+
+
+### Features
+
+* career-ops job search pipeline, web dashboard, and browser auto-apply automation ([935b3c8](https://github.com/PrathameshTawar/ops-/commit/935b3c849c84ca934d43f181796ff2487e33b9a3))
+
 ## [0.9.0](https://github.com/santifer/career-ops/compare/web-v0.8.1...web-v0.9.0) (2026-08-31)
 
 
