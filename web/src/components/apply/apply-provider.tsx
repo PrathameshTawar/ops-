@@ -328,6 +328,7 @@ export function ApplyProvider({ children }: { children: React.ReactNode }) {
         });
       }
       if (d.navigated) setError("Heads up: the form's page changed during fill — review it carefully before submitting (career-ops never submits for you).");
+      else if (d.handedOff === false) setError("The filled form is open in the Chrome window career-ops started, but it couldn't be moved to the front — find it in your taskbar/dock. Don't reopen the job link: a new tab starts the form from scratch.");
       setStatus("done");
       // ESCALATION ("si no va, full agente"): if deterministic fill clearly
       // didn't land (most fields failed / mismatched), let the agent fill it.
