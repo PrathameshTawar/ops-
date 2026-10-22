@@ -55,7 +55,7 @@ import { tmpdir } from 'os';
 import { promisify } from 'util';
 import { fileURLToPath, pathToFileURL } from 'url';
 import * as yaml from 'js-yaml';
-import { pass, fail, warn, run, lastRunFailure, formatRunFailure, fileExists, finish, ROOT, QUICK, NODE, DEFAULT_SCRIPT_TIMEOUT_MS, getBash, toBashPath, hermeticGitEnv } from './tests/helpers.mjs';
+import { pass, fail, warn, run, runBashScript, lastRunFailure, formatRunFailure, fileExists, finish, ROOT, QUICK, NODE, DEFAULT_SCRIPT_TIMEOUT_MS, getBash, toBashPath, hermeticGitEnv } from './tests/helpers.mjs';
 import { flagValue, hasFlag } from './lib/cli-flags.mjs';
 import { collectMjsFiles } from './lib/mjs-files.mjs';
 
@@ -13128,7 +13128,7 @@ try {
       'log_discard "7" "https://example.com/mismatch" "wrong seniority band"',
       `cat "${toBashPath(join(batchDir, 'logs', 'discard.log'))}"`,
     ].join('\n');
-    const out = run(getBash(), ['-c', script], { cwd: tmp, stdio: ['pipe', 'pipe', 'pipe'] }) || '';
+    const out = runBashScript(script, { cwd: tmp, stdio: ['pipe', 'pipe', 'pipe'] }) || '';
     const line = out.trim().split('\n').pop() || '';
     const cols = line.split('\t');
 
@@ -16456,33 +16456,21 @@ console.log('\n59. CV template resolver (cv-templates.mjs)');
 }
 
 
-console.log('\n59c. The exported script budget matches the one run() enforces');
+console.log('\n59c. The exported script budget is the one run() enforces');
 {
-  // DEFAULT_SCRIPT_TIMEOUT_MS and the `timeout: 30000` literal inside run() are
-  // the same number held in two places, because that execFileSync call is kept
-  // byte-identical on purpose — editing it makes CodeQL re-attribute its
-  // long-standing "uncontrolled command line" finding to whichever PR touched
-  // the line. A comment asks the two to stay in step, and a comment is not a
-  // mechanism: if they drift, the slow-script warning starts measuring against
-  // a budget nobody is enforcing, and the first sign is a script killed at a
-  // limit the suite never mentioned. Read the literal back and compare.
-  // Anchored on run()'s own `(exe, args, …)` call signature rather than on
-  // `execFileSync` alone: that file has six other execFileSync calls, and a
-  // pattern that takes the FIRST match would start comparing against whichever
-  // one grows a `timeout:` first — a guard quietly measuring the wrong number,
-  // which is worse than no guard because it still reports green.
-  //
-  // Zero or several matches is therefore a failure in its own right, not a
-  // reason to fall back to a best guess.
+  // DEFAULT_SCRIPT_TIMEOUT_MS used to be restated as a `timeout: 30000` literal
+  // inside run(), kept in step by a comment, and this section read the literal
+  // back to catch drift. run() and runBashScript() now pass the constant itself,
+  // so the check is that no execFileSync in helpers.mjs that spreads caller opts
+  // has grown its own numeric timeout again.
   const helpersSrc = readFileSync(join(ROOT, 'tests', 'helpers.mjs'), 'utf-8');
-  const enforced = [...helpersSrc.matchAll(/execFileSync\(\s*exe\s*,\s*args\s*,\s*\{[^}]*?timeout:\s*([1-9]\d*)\s*(?=[,}])/g)];
-  if (enforced.length !== 1) {
-    fail(`expected exactly one timeout literal in run()'s execFileSync call, found ${enforced.length}`
-      + ' — if that call was refactored or duplicated, update this check alongside it');
-  } else if (Number(enforced[0][1]) === DEFAULT_SCRIPT_TIMEOUT_MS) {
-    pass(`run()'s enforced timeout (${enforced[0][1]}ms) matches the exported DEFAULT_SCRIPT_TIMEOUT_MS`);
+  const literal = [...helpersSrc.matchAll(/execFileSync\([^)]*?timeout:\s*\d[\d_]*\s*,[^)]*?\.\.\.opts/g)];
+  const viaConstant = [...helpersSrc.matchAll(/execFileSync\([^)]*?timeout:\s*DEFAULT_SCRIPT_TIMEOUT_MS\s*,[^)]*?\.\.\.opts/g)];
+  if (literal.length === 0 && viaConstant.length === 2) {
+    pass(`run() and runBashScript() both enforce DEFAULT_SCRIPT_TIMEOUT_MS (${DEFAULT_SCRIPT_TIMEOUT_MS}ms)`);
   } else {
-    fail(`budget drift: run() enforces ${enforced[0][1]}ms but DEFAULT_SCRIPT_TIMEOUT_MS is ${DEFAULT_SCRIPT_TIMEOUT_MS}ms`);
+    fail(`budget drift: ${literal.length} execFileSync call(s) in helpers.mjs restate a numeric timeout, `
+      + `${viaConstant.length} use DEFAULT_SCRIPT_TIMEOUT_MS (expected 0 and 2)`);
   }
 }
 

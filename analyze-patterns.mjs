@@ -19,6 +19,7 @@ import { fileURLToPath } from 'url';
 import { load as yamlLoad } from 'js-yaml';
 import { resolveColumns, parseTrackerRow, normalizeVia } from './tracker-parse.mjs';
 import { getCareerOpsRoot } from './path-resolver.mjs';
+import { detectAtsVendor as detectVendor } from './lib/ats-vendor.mjs';
 
 const CAREER_OPS = getCareerOpsRoot();
 const APPS_FILE = existsSync(join(CAREER_OPS, 'data/applications.md'))
@@ -844,33 +845,6 @@ function classifyRemote(raw) {
   if (/(?<!\w)(global|anywhere|worldwide|no restrict|70\+|work from anywhere)(?!\w)/.test(lower)) return 'global remote';
   if (/\b(remote|latam|americas|brazil|fully remote)\b/.test(lower)) return 'regional remote';
   return 'unknown';
-}
-
-// --- Detect ATS vendor from a posting URL ---
-// Host-only match, deliberately looser than liveness-api.mjs's resolveAtsApi()
-// (which needs the full posting path to build an API URL) — a tracker report's
-// URL may point at a board/careers page, not a canonical posting.
-//
-// SCOPE (intentional): only ATS with clean, public URL fingerprints — Greenhouse,
-// Lever, Ashby, Workday, iCIMS. White-labeled ATS (UKG, Dayforce, and similar) are
-// NOT detectable from the URL alone and are deferred until the community adds a
-// reliable signal (e.g. confirmation-email domain). Undetected → 'unknown'.
-const VENDOR_HOST_PATTERNS = [
-  { id: 'greenhouse', test: (h) => /(^|\.)greenhouse\.io$/.test(h) },
-  { id: 'lever',      test: (h) => h === 'jobs.lever.co' || h.endsWith('.lever.co') },
-  { id: 'ashby',      test: (h) => h === 'jobs.ashbyhq.com' || h.endsWith('.ashbyhq.com') },
-  { id: 'workday',    test: (h) => h.endsWith('.myworkdayjobs.com') || h.endsWith('.myworkdaysite.com') },
-  { id: 'icims',      test: (h) => h.endsWith('.icims.com') },
-];
-
-function detectVendor(rawUrl) {
-  if (!rawUrl || typeof rawUrl !== 'string') return null;
-  let u;
-  try { u = new URL(rawUrl.trim()); } catch { return null; }
-  if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
-  const host = u.hostname.toLowerCase();
-  for (const v of VENDOR_HOST_PATTERNS) if (v.test(host)) return v.id;
-  return null;
 }
 
 // --- Classify company size ---
