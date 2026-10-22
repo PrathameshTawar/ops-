@@ -1287,18 +1287,23 @@ if (!existsSync(API_PATH)) {
   const wrapperFile = join(tmpDir, 'run.mjs');
   try {
     await mkdir(tmpDir, { recursive: true });
+    // The wrapper's source is a constant; the paths it needs arrive as argv.
+    // Splicing them into the source, even through JSON.stringify, makes the
+    // generated program depend on what tmpdir() returned.
     await writeFile(wrapperFile, [
       "import { writeFileSync } from 'node:fs';",
-      `globalThis.fetch = async (...args) => { writeFileSync(${JSON.stringify(marker)}, String(args[0]), 'utf8'); throw new Error('EGRESS'); };`,
-      `process.argv = [process.argv[0], ${JSON.stringify(CHECK_PATH)}, 'Acme Corp', '--json', '--cache-dir', ${JSON.stringify(join(tmpDir, 'cache'))}];`,
-      `await import(${JSON.stringify(pathToFileURL(CHECK_PATH).href)});`,
+      "import { pathToFileURL } from 'node:url';",
+      'const [marker, checkPath, cacheDir] = process.argv.slice(2);',
+      "globalThis.fetch = async (...args) => { writeFileSync(marker, String(args[0]), 'utf8'); throw new Error('EGRESS'); };",
+      "process.argv = [process.argv[0], checkPath, 'Acme Corp', '--json', '--cache-dir', cacheDir];",
+      'await import(pathToFileURL(checkPath).href);',
     ].join('\n'), 'utf8');
 
     await new Promise((resolve) => {
       const env = { ...process.env, H1B_INDEX_PATH: NO_INDEX };
       delete env.H1B_API_BASE;
       delete env.H1B_API_TOKEN;
-      execFile(process.execPath, [wrapperFile], { env, timeout: 20_000 }, (err, stdout) => {
+      execFile(process.execPath, [wrapperFile, marker, CHECK_PATH, join(tmpDir, 'cache')], { env, timeout: 20_000 }, (err, stdout) => {
         const code = (err && typeof err.code === 'number') ? err.code : 0;
         let parsed = null;
         try { parsed = JSON.parse(String(stdout || '')); } catch { /* asserted below */ }
@@ -1353,19 +1358,21 @@ if (!existsSync(CHECK_PATH) || !existsSync(INDEX_PATH)) {
     const wrapperFile = join(tmpDir, 'run.mjs');
     await mkdir(tmpDir, { recursive: true });
     await writeFile(wrapperFile, [
+      "import { pathToFileURL } from 'node:url';",
+      'const [checkPath, name, cacheDir] = process.argv.slice(2);',
       'let calls = 0;',
       'globalThis.fetch = async (url) => {',
       '  calls++;',
       "  const body = String(url).includes('/employers/search')",
-      `    ? { results: [{ id: 'from-endpoint', name: ${JSON.stringify(NAME)} }] }`,
-      `    : { employer: { name: ${JSON.stringify(NAME)}, id: 'from-endpoint' }, filings: { certified: 42 }, green_card: { pwd: 0, perm: 0 } };`,
+      "    ? { results: [{ id: 'from-endpoint', name }] }",
+      "    : { employer: { name, id: 'from-endpoint' }, filings: { certified: 42 }, green_card: { pwd: 0, perm: 0 } };",
       '  return new Response(JSON.stringify(body), { status: 200 });',
       '};',
-      `process.argv = [process.argv[0], ${JSON.stringify(CHECK_PATH)}, ${JSON.stringify(NAME)}, '--json', '--cache-dir', ${JSON.stringify(join(tmpDir, 'cache'))}, '--refresh'];`,
+      "process.argv = [process.argv[0], checkPath, name, '--json', '--cache-dir', cacheDir, '--refresh'];",
       'const chunks = [];',
       'const write = process.stdout.write.bind(process.stdout);',
       'process.stdout.write = (s) => { chunks.push(String(s)); return true; };',
-      `await import(${JSON.stringify(pathToFileURL(CHECK_PATH).href)});`,
+      'await import(pathToFileURL(checkPath).href);',
       'for (let i = 0; i < 200 && chunks.length === 0; i++) await new Promise(r => setTimeout(r, 25));',
       'process.stdout.write = write;',
       "write(JSON.stringify({ calls, out: chunks.join('') }));",
@@ -1376,7 +1383,7 @@ if (!existsSync(CHECK_PATH) || !existsSync(INDEX_PATH)) {
       delete env.H1B_API_TOKEN;
       if (base === undefined) delete env.H1B_API_BASE;
       else env.H1B_API_BASE = base;
-      execFile(process.execPath, [wrapperFile], { env, timeout: 30_000 }, (_err, stdout) => {
+      execFile(process.execPath, [wrapperFile, CHECK_PATH, NAME, join(tmpDir, 'cache')], { env, timeout: 30_000 }, (_err, stdout) => {
         let outer = null;
         try { outer = JSON.parse(String(stdout || '')); } catch { /* reported by the caller */ }
         let result = null;
@@ -1450,21 +1457,23 @@ if (!existsSync(CHECK_PATH) || !existsSync(CACHE_PATH)) {
     );
     const wrapperFile = join(tmpDir, `run-${randomUUID()}.mjs`);
     await writeFile(wrapperFile, [
+      "import { pathToFileURL } from 'node:url';",
+      'const [checkPath, name, cacheDir] = process.argv.slice(2);',
       'let calls = 0;',
       'globalThis.fetch = async (url) => {',
       '  calls++;',
       "  const body = String(url).includes('/employers/search')",
-      `    ? { results: [{ id: 'refetched', name: ${JSON.stringify(NAME)} }] }`,
-      `    : { employer: { name: ${JSON.stringify(NAME)}, id: 'refetched' }, filings: { certified: 777 }, green_card: { pwd: 1, perm: 1 } };`,
+      "    ? { results: [{ id: 'refetched', name }] }",
+      "    : { employer: { name, id: 'refetched' }, filings: { certified: 777 }, green_card: { pwd: 1, perm: 1 } };",
       '  return new Response(JSON.stringify(body), { status: 200 });',
       '};',
-      `process.argv = [process.argv[0], ${JSON.stringify(CHECK_PATH)}, ${JSON.stringify(NAME)}, '--json', '--cache-dir', ${JSON.stringify(tmpDir)}];`,
+      "process.argv = [process.argv[0], checkPath, name, '--json', '--cache-dir', cacheDir];",
       'const chunks = [];',
       'const write = process.stdout.write.bind(process.stdout);',
       'process.stdout.write = (s) => { chunks.push(String(s)); return true; };',
       // check.mjs calls main() without awaiting it, so the import resolves
       // before the answer is written. Poll rather than sleep a fixed span.
-      `await import(${JSON.stringify(pathToFileURL(CHECK_PATH).href)});`,
+      'await import(pathToFileURL(checkPath).href);',
       'for (let i = 0; i < 200 && chunks.length === 0; i++) await new Promise(r => setTimeout(r, 25));',
       'process.stdout.write = write;',
       "write(JSON.stringify({ calls, out: chunks.join('') }));",
@@ -1473,7 +1482,7 @@ if (!existsSync(CHECK_PATH) || !existsSync(CACHE_PATH)) {
     return new Promise((resolve) => {
       execFile(
         process.execPath,
-        [wrapperFile],
+        [wrapperFile, CHECK_PATH, NAME, tmpDir],
         { env: { ...process.env, H1B_API_BASE: CURRENT, H1B_INDEX_PATH: NO_INDEX }, timeout: 30_000 },
         (_err, stdout) => {
           let outer = null;

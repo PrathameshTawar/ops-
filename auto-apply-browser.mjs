@@ -4,6 +4,7 @@ import path from 'path';
 import * as yaml from 'js-yaml';
 import { getCareerOpsRoot } from './path-resolver.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
+import { detectAtsVendor } from './lib/ats-vendor.mjs';
 
 // Candidate data comes from config/profile.yml (the single source of truth),
 // never from values typed into this script.
@@ -97,12 +98,9 @@ export async function fillPage(page, url, { candidate = loadCandidate(), cvPath 
   await page.waitForTimeout(1000);
 
   // Detect ATS platform
-  const href = url.toLowerCase();
-  let atsType = 'generic';
-  if (href.includes('ashbyhq.com')) atsType = 'ashby';
-  else if (href.includes('greenhouse.io') || href.includes('greenhouse')) atsType = 'greenhouse';
-  else if (href.includes('lever.co')) atsType = 'lever';
-  else if (href.includes('workday') || href.includes('myworkdayjobs')) atsType = 'workday';
+  // By parsed hostname, never a substring of the URL string: a substring test
+  // also matched a vendor name sitting in a path, query, or look-alike host.
+  const atsType = detectAtsVendor(url) || 'generic';
 
   console.log(`[ATS Vendor Detected]: ${atsType.toUpperCase()}`);
 

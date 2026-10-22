@@ -25,13 +25,8 @@ export const rmSync = (target, opts = {}) => _rmSync(target, { maxRetries: 10, r
 /**
  * The per-script budget run() applies when a caller does not override it.
  *
- * Deliberately NOT substituted into the `timeout: 30000` literal inside run()
- * below. The comment there explains why that execFileSync call is kept
- * byte-identical: editing the line makes CodeQL re-attribute its long-standing
- * "uncontrolled command line" finding to whichever PR touched it. Exported so
- * callers can reason about the budget — how close a script came to it, say —
- * rather than hard-coding the number in a second file. The two are linked by
- * this comment, not by the compiler: change one, change the other.
+ * Exported so callers can reason about the budget — how close a script came to
+ * it, say — rather than hard-coding the number in a second file.
  */
 export const DEFAULT_SCRIPT_TIMEOUT_MS = 30_000;
 
@@ -179,6 +174,10 @@ function resolveAllowedExecutable(cmd) {
  * removed (it had no callers). Failures return null so the caller decides
  * whether to count the result as a failure or warning.
  *
+ * A `bash -c <script>` call is refused here: it goes through runBashScript().
+ * Running a bash script file (`run(getBash(), [scriptPath, ...flags])`) is fine,
+ * because bash does not re-parse its positional arguments.
+ *
  * @param {string} cmd - Executable to run (must be on the allowlist above).
  * @param {string[]} [args=[]] - Argument vector.
  * @param {object} [opts={}] - Extra child_process options.
@@ -190,30 +189,65 @@ export function run(cmd, args = [], opts = {}) {
   // path and the previous run's diagnostics survive, which would let a later
   // formatRunFailure() attribute an unrelated child's stderr to whatever failed
   // most recently. A stale diagnostic is worse than none.
-  //
-  // Clearing here rather than on the success path also keeps the execFileSync
-  // call below byte-identical: editing that line makes CodeQL re-attribute its
-  // long-standing "uncontrolled command line" finding to whichever PR touched
-  // it. Nothing about what reaches the child changes either way, since the
-  // executable is still allowlisted and the arguments are still an argv vector.
   lastFailure = null;
   const exe = resolveAllowedExecutable(cmd);
+  // Kept off this call site on purpose. run() carries argv for every kind of
+  // child, including a job URL test-all.mjs fetches live from the Greenhouse
+  // API. If the same execFileSync could also be `bash -c <script>`, nothing
+  // about the call site says which arguments are data and which are a script
+  // the shell will parse, and that is what CodeQL's "uncontrolled command line"
+  // and "shell command built from environment values" findings here reported.
+  if (isShellExecutable(exe) && args.includes('-c')) {
+    throw new Error('run(): use runBashScript() for `bash -c`; run() only passes argv');
+  }
   try {
-    return execFileSync(exe, args, { cwd: ROOT, encoding: 'utf-8', timeout: 30000, ...opts }).trim();
+    // `shell: false` after the caller's opts, so no caller can switch a shell
+    // back on and have the argv joined into a command string.
+    return execFileSync(exe, args, { cwd: ROOT, encoding: 'utf-8', timeout: DEFAULT_SCRIPT_TIMEOUT_MS, ...opts, shell: false }).trim();
   } catch (e) {
-    // execFileSync attaches the child's streams and exit status to the error.
-    // Keep them: callers report failure as `<name> crashed`, and without this a
-    // CI-only failure arrives as a single line with no stack, no assertion text,
-    // and no exit code, which is not enough to act on.
-    lastFailure = {
-      status: e?.status ?? null,
-      signal: e?.signal ?? null,
-      stdout: e?.stdout == null ? '' : String(e.stdout),
-      stderr: e?.stderr == null ? '' : String(e.stderr),
-    };
-    warnFallbackShell(exe);
+    recordRunFailure(e, exe);
     return null;
   }
+}
+
+/**
+ * Run a bash script string with `bash -c` and return trimmed stdout on success.
+ *
+ * The one place the harness hands a string to a shell, separate from run() so
+ * that call site only ever sees scripts written in the tests themselves. Same
+ * defaults, failure contract and diagnostics as run().
+ *
+ * @param {string} script - Bash source, written by the test.
+ * @param {object} [opts={}] - Extra child_process options.
+ * @returns {string|null} Trimmed stdout, or null when the script fails.
+ */
+export function runBashScript(script, opts = {}) {
+  lastFailure = null;
+  const exe = getBash();
+  try {
+    return execFileSync(exe, ['-c', script], { cwd: ROOT, encoding: 'utf-8', timeout: DEFAULT_SCRIPT_TIMEOUT_MS, ...opts, shell: false }).trim();
+  } catch (e) {
+    recordRunFailure(e, exe);
+    return null;
+  }
+}
+
+function isShellExecutable(exe) {
+  return exe === 'bash' || exe === 'wsl' || WINDOWS_BASH_CANDIDATES.includes(exe);
+}
+
+function recordRunFailure(e, exe) {
+  // execFileSync attaches the child's streams and exit status to the error.
+  // Keep them: callers report failure as `<name> crashed`, and without this a
+  // CI-only failure arrives as a single line with no stack, no assertion text,
+  // and no exit code, which is not enough to act on.
+  lastFailure = {
+    status: e?.status ?? null,
+    signal: e?.signal ?? null,
+    stdout: e?.stdout == null ? '' : String(e.stdout),
+    stderr: e?.stderr == null ? '' : String(e.stderr),
+  };
+  warnFallbackShell(exe);
 }
 
 /** Diagnostics from the most recent failed run(), or null if the last run succeeded. */
