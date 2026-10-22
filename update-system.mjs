@@ -450,6 +450,11 @@ export const USER_PATHS = [
   'opencode.json',
   '.claude/settings.json',
   '.claude/hooks/',
+  // This fork's own apply/batch scripts: not in upstream, so updates leave them alone.
+  'apply-pipeline.mjs',
+  'auto-apply-browser.mjs',
+  'evaluate-batch.mjs',
+  'populate-batch.mjs',
 ];
 
 // Local user layer — a fork's own files, declared OUTSIDE the system layer.
