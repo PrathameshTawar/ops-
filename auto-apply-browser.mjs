@@ -1,22 +1,55 @@
 import { chromium } from 'playwright';
 import fs from 'fs';
 import path from 'path';
+import * as yaml from 'js-yaml';
+import { getCareerOpsRoot } from './path-resolver.mjs';
+import { isMainModule } from './lib/is-main-module.mjs';
 
-// Candidate profile data
-export const candidate = {
-  name: "Prathamesh Taware",
-  firstName: "Prathamesh",
-  lastName: "Taware",
-  email: "tawareprathamesh1010@gmail.com",
-  phone: "+91 8208199820",
-  location: "Pune, Maharashtra, India",
-  linkedin: "https://linkedin.com/in/prathamesh-taware",
-  github: "https://github.com/PrathameshTawar",
-  website: "https://github.com/PrathameshTawar",
-  bio: "AI Engineer & Systems Developer specializing in multi-agent orchestration (LangGraph, FastAPI), high-precision RAG (Qdrant, Pinecone), and LLM memory protocols (GML patent filed)."
-};
+// Candidate data comes from config/profile.yml (the single source of truth),
+// never from values typed into this script.
+function withScheme(u) {
+  if (!u) return '';
+  return /^https?:\/\//i.test(u) ? u : `https://${u}`;
+}
 
-export async function fillPage(page, url) {
+export function loadCandidate(root = getCareerOpsRoot()) {
+  const profilePath = path.join(root, 'config', 'profile.yml');
+  if (!fs.existsSync(profilePath)) {
+    throw new Error(`config/profile.yml not found at ${profilePath} — run onboarding first.`);
+  }
+  const c = (yaml.load(fs.readFileSync(profilePath, 'utf8')) || {}).candidate || {};
+  if (!c.full_name || !c.email) throw new Error('config/profile.yml needs candidate.full_name and candidate.email');
+  const parts = String(c.full_name).trim().split(/\s+/);
+  return {
+    name: c.full_name,
+    firstName: parts[0],
+    lastName: parts.slice(1).join(' '),
+    email: c.email,
+    phone: c.phone || '',
+    location: c.location || '',
+    linkedin: withScheme(c.linkedin),
+    github: withScheme(c.github),
+    website: withScheme(c.portfolio_url || c.github),
+  };
+}
+
+// The CV to attach: an explicit path wins, otherwise the newest PDF in output/.
+export function findCvPdf(explicit, root = getCareerOpsRoot()) {
+  if (explicit) {
+    const abs = path.resolve(explicit);
+    if (!fs.existsSync(abs)) throw new Error(`CV not found: ${explicit}`);
+    return abs;
+  }
+  const outDir = path.join(root, 'output');
+  if (!fs.existsSync(outDir)) return null;
+  const pdfs = fs.readdirSync(outDir, { recursive: true })
+    .filter((f) => String(f).toLowerCase().endsWith('.pdf'))
+    .map((f) => path.join(outDir, String(f)))
+    .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+  return pdfs[0] || null;
+}
+
+export async function fillPage(page, url, { candidate = loadCandidate(), cvPath = findCvPdf() } = {}) {
   let attempts = 0;
   let pageLoaded = false;
 
@@ -76,7 +109,8 @@ export async function fillPage(page, url) {
   let fieldsFilled = 0;
 
   // Fill Name
-  const nameSelectors = ['input[name="name"]', 'input[id*="name"]', 'input[autocomplete="name"]', 'input[aria-label*="Name"]'];
+  // Exact full-name fields only: a loose *name* match also hits company_name / last_name.
+  const nameSelectors = ['input[name="name"]', 'input[id="name"]', 'input[name="full_name"]', 'input[autocomplete="name"]', 'input[aria-label="Full name" i]'];
   for (const sel of nameSelectors) {
     const el = page.locator(sel).first();
     if (await el.count() > 0 && await el.isVisible()) {
@@ -161,46 +195,49 @@ export async function fillPage(page, url) {
     }
   }
 
-  // Fill Textarea / Cover Letter / Additional Info
+  // Free-text questions ("Why us?", cover letter, ...) need answers written for
+  // this job, so they are listed for the human instead of filled with one bio.
+  const openQuestions = [];
   const textareas = page.locator('textarea');
   const taCount = await textareas.count();
   for (let i = 0; i < taCount; i++) {
     const ta = textareas.nth(i);
-    if (await ta.isVisible()) {
-      await ta.fill(candidate.bio);
-      fieldsFilled++;
-      console.log(`✓ Filled Free-Text / Cover Letter field #${i + 1}`);
-    }
+    if (!(await ta.isVisible()) || (await ta.inputValue()).trim()) continue;
+    const label = await ta.evaluate((el) => {
+      const byFor = el.id && document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+      const text = (byFor && byFor.textContent) || el.getAttribute('aria-label') || el.placeholder || el.name || '';
+      return text.replace(/\s+/g, ' ').trim();
+    });
+    openQuestions.push(label || `Text field #${i + 1}`);
   }
 
-  // Attach CV / Resume PDF if present
-  const cvCandidates = [
-    path.resolve('cv.pdf'),
-    path.resolve('output/Prathamesh_Taware_Resume.pdf'),
-    'C:\\Users\\HP\\Downloads\\Prathamesh_Taware_Resume_Final_OnePage.pdf'
-  ];
-  const cvPath = cvCandidates.find(p => fs.existsSync(p));
   if (cvPath) {
     const fileInputs = page.locator('input[type="file"]');
     const fileCount = await fileInputs.count();
     for (let i = 0; i < fileCount; i++) {
-      const fi = fileInputs.nth(i);
       try {
-        await fi.setInputFiles(cvPath);
+        await fileInputs.nth(i).setInputFiles(cvPath);
         fieldsFilled++;
-        console.log(`✓ Attached Resume PDF (${path.basename(cvPath)})`);
+        console.log(`✓ Attached CV (${path.basename(cvPath)})`);
         break;
       } catch (e) {
         // file input might be hidden or styled
       }
     }
+  } else {
+    console.log('⚠️ No CV PDF found in output/ — attach it yourself, or pass --cv <file.pdf>.');
+  }
+
+  if (openQuestions.length) {
+    console.log('\n✍️  Answer these yourself before submitting:');
+    openQuestions.forEach((q) => console.log(`   • ${q}`));
   }
 
   console.log(`\n🎉 Successfully filled ${fieldsFilled} candidate form fields for ${title}`);
-  return { success: true, fieldsFilled, title, atsType };
+  return { success: true, fieldsFilled, title, atsType, openQuestions };
 }
 
-export async function processApplication(url, isHeadless = true, keepOpen = false) {
+export async function processApplication(url, isHeadless = true, keepOpen = false, fillOptions = {}) {
   console.log(`\n==================================================`);
   console.log(`[Auto-Apply] Processing URL: ${url}`);
   console.log(`==================================================`);
@@ -212,7 +249,7 @@ export async function processApplication(url, isHeadless = true, keepOpen = fals
   const page = await context.newPage();
 
   try {
-    const res = await fillPage(page, url);
+    const res = await fillPage(page, url, fillOptions);
     return res;
   } catch (err) {
     console.error(`❌ Application auto-fill error on ${url}:`, err.message);
@@ -232,9 +269,16 @@ export async function processApplication(url, isHeadless = true, keepOpen = fals
   }
 }
 
-// Script CLI runner
-if (process.argv[1] && process.argv[1].endsWith('auto-apply-browser.mjs')) {
-  const isHeadless = process.argv.includes('--headless');
-  const target = process.argv.find(arg => arg.startsWith('http')) || 'https://job-boards.greenhouse.io/anthropic/jobs/5183051008';
-  processApplication(target, isHeadless, !isHeadless);
+// Script CLI runner: node auto-apply-browser.mjs <job-url> [--cv output/cv.pdf]
+if (isMainModule(import.meta.url)) {
+  const args = process.argv.slice(2);
+  const target = args.find((arg) => arg.startsWith('http'));
+  const cvIdx = args.indexOf('--cv');
+  if (!target) {
+    console.error('Usage: node auto-apply-browser.mjs <job-url> [--cv <file.pdf>]');
+    process.exit(1);
+  }
+  const fillOptions = { candidate: loadCandidate(), cvPath: findCvPdf(cvIdx !== -1 ? args[cvIdx + 1] : undefined) };
+  // Always visible: the point is to leave the filled form open for you to submit.
+  processApplication(target, false, true, fillOptions);
 }
