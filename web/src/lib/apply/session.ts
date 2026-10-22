@@ -110,7 +110,12 @@ async function enrichFromAts(url: string, fields: ApplyField[]): Promise<void> {
 // so we can: extract → (user verifies pre-filled answers) → FILL the real form →
 // bringToFront() for the human to submit it themselves. Headed (channel:chrome) =
 // the user's own Chrome on their residential IP (best ATS success); never submits.
-type Session = { id: string; url: string; title: string; fields: ApplyField[]; context: BrowserContext; page: Page; frame: Frame; createdAt: number; formShot?: string };
+//
+// Once handed off, the filled window belongs to the HUMAN: closing the session,
+// opening the next application, the idle prune and the idle browser close all
+// leave it on screen. Closing it there threw away the filled form, and reopening
+// the job link in another browser starts the application from scratch.
+type Session = { id: string; url: string; title: string; fields: ApplyField[]; context: BrowserContext; page: Page; frame: Frame; createdAt: number; lastActive: number; handedOff?: boolean; formShot?: string };
 
 declare global {
   // eslint-disable-next-line no-var
@@ -150,7 +155,9 @@ async function headedBrowser(): Promise<Browser> {
 function scheduleIdleClose() {
   if (globalThis.__coIdleTimer) clearTimeout(globalThis.__coIdleTimer);
   globalThis.__coIdleTimer = setTimeout(() => {
-    if (SESSIONS.size === 0) {
+    // A handed-off form still open on screen keeps the browser alive.
+    const userWindowOpen = globalThis.__coHeadedBrowser?.contexts().some((c) => c.pages().length > 0);
+    if (SESSIONS.size === 0 && !userWindowOpen) {
       const b = globalThis.__coHeadedBrowser;
       globalThis.__coHeadedBrowser = undefined;
       void b?.close().catch(() => {});
@@ -160,7 +167,8 @@ function scheduleIdleClose() {
 
 function prune() {
   const now = Date.now();
-  for (const [id, s] of SESSIONS) if (now - s.createdAt > 15 * 60_000) void closeSession(id);
+  // Idle time, not age: reviewing answers before the fill can take a while.
+  for (const [id, s] of SESSIONS) if (now - s.lastActive > 30 * 60_000) void closeSession(id);
 }
 
 /** Bounded scroll pass to trigger lazy/virtualized forms that only render their
@@ -262,7 +270,7 @@ export async function openSession(url: string, cliId?: string, forceAgent?: bool
     if (cliId && why.code === "no-form") {
       const id = `apply-${crypto.randomUUID()}`;
       const title = form.title || (await page.title().catch(() => "")) || "Application";
-      SESSIONS.set(id, { id, url, title, fields: [], context, page, frame, createdAt: Date.now(), formShot: shots[shots.length - 1] });
+      SESSIONS.set(id, { id, url, title, fields: [], context, page, frame, createdAt: Date.now(), lastActive: Date.now(), formShot: shots[shots.length - 1] });
       return { id, title, fields: [], shots, issues: [], needsDrive: true };
     }
     return abort(why.message);
@@ -278,12 +286,14 @@ export async function openSession(url: string, cliId?: string, forceAgent?: bool
   if (unlabeled > 0) issues.push({ level: "warn", code: "unlabeled-fields", message: `${unlabeled} field${unlabeled > 1 ? "s" : ""} couldn't be labelled cleanly — double-check ${unlabeled > 1 ? "them" : "it"} before submitting.` });
 
   const id = `apply-${crypto.randomUUID()}`;
-  SESSIONS.set(id, { id, url, title: form.title, fields: form.fields, context, page, frame, createdAt: Date.now(), formShot: shots[shots.length - 1] });
+  SESSIONS.set(id, { id, url, title: form.title, fields: form.fields, context, page, frame, createdAt: Date.now(), lastActive: Date.now(), formShot: shots[shots.length - 1] });
   return { id, title: form.title, fields: form.fields, shots, issues };
 }
 
 export function getSession(id: string): Session | undefined {
-  return SESSIONS.get(id);
+  const s = SESSIONS.get(id);
+  if (s) s.lastActive = Date.now();
+  return s;
 }
 
 /** Open a bare headed page on a URL (for the agentic drive loop / validation),
@@ -343,7 +353,13 @@ export async function finalizeDrivenSession(id: string, cliId?: string): Promise
 export async function closeSession(id: string): Promise<void> {
   const s = SESSIONS.get(id);
   SESSIONS.delete(id);
-  await s?.context.close().catch(() => {});
+  // Stop tracking a handed-off form but leave its window open for the human
+  // to submit; it is cleaned up when they close that window.
+  if (s?.handedOff && !s.page.isClosed()) {
+    s.page.once("close", () => void s.context.close().catch(() => {}));
+  } else {
+    await s?.context.close().catch(() => {});
+  }
   if (SESSIONS.size === 0) scheduleIdleClose();
 }
 
@@ -366,6 +382,7 @@ export async function fillSession(
 ): Promise<{ steps: FillStep[]; navigated: boolean; issues: ApplyIssue[] }> {
   const s = SESSIONS.get(id);
   if (!s) throw new Error("apply session not found (it may have expired)");
+  s.lastActive = Date.now();
   const byId = new Map(fieldsMeta.map((f) => [f.id, f]));
   const steps: FillStep[] = [];
   // Belt-and-suspenders: if filling ever navigates the page (i.e. something got
@@ -518,20 +535,29 @@ export async function fillSession(
 
 /** Hand the real (now pre-filled) form to the HUMAN to review + submit. The
  *  window was kept OFF-SCREEN during fill, so bringToFront alone wouldn't make it
- *  visible — we reposition it on-screen via CDP first. We never submit. */
-export async function handoffSession(id: string): Promise<void> {
+ *  visible — we reposition it on-screen via CDP first. We never submit.
+ *  Returns false when the window could not be moved on screen, so the UI can
+ *  tell the user where to find it instead of claiming it is in front. */
+export async function handoffSession(id: string): Promise<boolean> {
   const s = SESSIONS.get(id);
   if (!s) throw new Error("apply session not found");
+  s.handedOff = true;
+  s.lastActive = Date.now();
+  let moved = false;
   try {
     const cdp = await s.context.newCDPSession(s.page);
     const { windowId } = (await cdp.send("Browser.getWindowForTarget")) as { windowId: number };
+    // A minimized/maximized window ignores bounds, so restore it first.
+    await cdp.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "normal" } });
     await cdp.send("Browser.setWindowBounds", {
       windowId,
-      bounds: { left: 80, top: 60, width: 1280, height: 920, windowState: "normal" },
+      bounds: { left: 80, top: 60, width: 1280, height: 920 },
     });
     await cdp.detach().catch(() => {});
+    moved = true;
   } catch {
     /* CDP unavailable → bringToFront still raises it */
   }
   await s.page.bringToFront().catch(() => {});
+  return moved;
 }
