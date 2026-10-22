@@ -327,6 +327,8 @@ try {
 
   const originalFetch = globalThis.fetch;
   const seenFetchOptions = [];
+  // Relative to today so the item stays inside the 3-month window below.
+  const recentPubDate = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toUTCString();
   globalThis.fetch = async (url, options) => {
     seenFetchOptions.push({ url, options });
     if (seenFetchOptions.length === 1) {
@@ -341,7 +343,7 @@ try {
         <item>
           <title>Acme raises $25M Series A</title>
           <link>https://techcrunch.com/acme</link>
-          <pubDate>Wed, 15 Jul 2026 12:00:00 +0000</pubDate>
+          <pubDate>${recentPubDate}</pubDate>
           <description>Acme raises funding.</description>
         </item>
       </channel></rss>`, {

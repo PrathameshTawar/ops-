@@ -1,18 +1,48 @@
+/**
+ * apply-pipeline.mjs — one-click-submit applying for the jobs in data/pipeline.md.
+ *
+ * Opens each pending job in a visible Chrome window, fills your details from
+ * config/profile.yml and attaches your CV, then waits: you answer any
+ * free-text questions, click Submit yourself, and press Enter for the next job.
+ * Submitted jobs are ticked in data/pipeline.md and added to the tracker.
+ *
+ * Usage:
+ *   npm run apply                                   # all pending jobs
+ *   npm run apply -- --limit=10 --filter=pune       # first 10 matching "pune"
+ *   npm run apply -- --cv output/cv-prathamesh.pdf  # pick the CV to attach
+ */
 import { chromium } from 'playwright';
 import fs from 'fs';
 import path from 'path';
 import readline from 'readline';
-import { fillPage } from './auto-apply-browser.mjs';
+import { spawnSync } from 'child_process';
+import { fillPage, loadCandidate, findCvPdf } from './auto-apply-browser.mjs';
+import { isMainModule } from './lib/is-main-module.mjs';
+import { reserveReportNumbers, releaseReportNumbers } from './reserve-report-num.mjs';
 
 const pipelinePath = path.resolve('data/pipeline.md');
-const trackerPath = path.resolve('data/applications.md');
+const additionsDir = path.resolve('batch/tracker-additions');
 const historyPath = path.resolve('data/auto-apply-history.tsv');
 
-function getNextTrackerNumber(trackerContent) {
-  const matches = [...trackerContent.matchAll(/\|\s*(\d+)\s*\|/g)];
-  if (!matches.length) return 1;
-  const numbers = matches.map(m => parseInt(m[1], 10)).filter(n => !isNaN(n));
-  return Math.max(...numbers) + 1;
+// Record a submitted application through the canonical tracker path: one TSV
+// in batch/tracker-additions/ merged by merge-tracker.mjs (dedup, locking,
+// sorting). There is no evaluation behind these rows, so the score is the N/A
+// sentinel rather than an invented number.
+export async function recordApplied(job, today, cvAttached) {
+  const reserved = await reserveReportNumbers(1);
+  const num = reserved[0];
+  try {
+    const slug = job.company.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'company';
+    const clean = (v) => String(v).replace(/[\t\r\n]+/g, ' ').trim();
+    const row = [num, today, clean(job.company), clean(job.role), 'Applied', 'N/A', cvAttached ? '✅' : '❌', '-', clean(`Applied via pipeline runner; ${job.location}`), job.url].join('\t');
+    fs.mkdirSync(additionsDir, { recursive: true });
+    fs.writeFileSync(path.join(additionsDir, `${String(num).padStart(3, '0')}-${slug}.tsv`), row + '\n', 'utf8');
+    const merge = spawnSync(process.execPath, ['merge-tracker.mjs'], { stdio: 'inherit' });
+    if (merge.status !== 0) throw new Error('merge-tracker.mjs failed');
+    return num;
+  } finally {
+    await releaseReportNumbers(reserved).catch(() => {});
+  }
 }
 
 function askUser(rl, promptText) {
@@ -34,6 +64,9 @@ async function runPipeline() {
   const filterArg = args.find(a => a.startsWith('--filter='))?.replace('--filter=', '').toLowerCase();
   const limitArg = args.find(a => a.startsWith('--limit='))?.replace('--limit=', '');
   const limit = limitArg ? parseInt(limitArg, 10) : Infinity;
+  const cvIdx = args.indexOf('--cv');
+  const fillOptions = { candidate: loadCandidate(), cvPath: findCvPdf(cvIdx !== -1 ? args[cvIdx + 1] : undefined) };
+  console.log(fillOptions.cvPath ? `📎 CV to attach: ${path.relative(process.cwd(), fillOptions.cvPath)}` : '⚠️ No CV PDF in output/ — forms will be filled without one (or pass --cv <file.pdf>).');
 
   const pipelineContent = fs.readFileSync(pipelinePath, 'utf8');
   const lines = pipelineContent.split('\n');
@@ -112,7 +145,7 @@ async function runPipeline() {
 
     let fillResult = null;
     try {
-      fillResult = await fillPage(page, job.url);
+      fillResult = await fillPage(page, job.url, fillOptions);
       await page.bringToFront().catch(() => {});
     } catch (e) {
       console.error(`⚠️ Could not auto-fill this form: ${e.message}`);
@@ -160,20 +193,15 @@ async function runPipeline() {
       fs.appendFileSync(historyPath, `${job.url}\tSUCCESS\t${fieldsCount}\t${ats}\t${dateIso}\n`, 'utf8');
     } catch (e) {}
 
-    // 3. Append row to data/applications.md tracker
+    // 3. Record it in the tracker (data/applications.md)
     try {
-      if (fs.existsSync(trackerPath)) {
-        const trackerContent = fs.readFileSync(trackerPath, 'utf8');
-        const nextNum = getNextTrackerNumber(trackerContent);
-        const trackerRow = `| ${nextNum} | ${today} | ${job.company} | ${job.role} | 4.8/5 | Applied | ✅ | - | Applied via pipeline runner; ${job.location} |\n`;
-        fs.appendFileSync(trackerPath, trackerRow, 'utf8');
-        console.log(`✓ Tracked as Application #${nextNum} in data/applications.md`);
-      }
+      const num = await recordApplied(job, today, Boolean(fillOptions.cvPath));
+      console.log(`✓ Tracked as Application #${num} in data/applications.md`);
     } catch (e) {
       console.error(`Warning updating applications.md: ${e.message}`);
     }
 
-    console.log(`🎉 [${appliedCount} applied] Successfully submitted for ${job.company}!`);
+    console.log(`🎉 [${appliedCount} applied] Recorded as submitted for ${job.company}.`);
   }
 
   rl.close();
@@ -187,7 +215,9 @@ async function runPipeline() {
   console.log(`======================================================================\n`);
 }
 
-runPipeline().catch(err => {
-  console.error('Fatal error in pipeline runner:', err);
-  process.exit(1);
-});
+if (isMainModule(import.meta.url)) {
+  runPipeline().catch(err => {
+    console.error('Fatal error in pipeline runner:', err);
+    process.exit(1);
+  });
+}
