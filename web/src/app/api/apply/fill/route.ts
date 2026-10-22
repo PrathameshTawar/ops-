@@ -32,8 +32,8 @@ export async function POST(req: Request) {
 
   try {
     const result = await fillSession(sessionId, answers, fields, cvPath);
-    if (handoff) await handoffSession(sessionId).catch(() => {});
-    return Response.json({ ...result, handedOff: !!handoff, cvAttached: !!cvPath });
+    const handedOff = handoff ? await handoffSession(sessionId).catch(() => false) : false;
+    return Response.json({ ...result, handedOff, cvAttached: !!cvPath });
   } catch (e) {
     return Response.json({ error: e instanceof Error ? e.message.slice(0, 200) : "fill failed" }, { status: 500 });
   }
