@@ -72,6 +72,9 @@ jobs:
           if-no-files-found: ignore
   upgrade-gate:
     name: Upgrade regression gate
+    # Needs upstream release tags in this repo's history. This fork starts
+    # from a squashed initial commit, so no release is an ancestor of HEAD.
+    if: github.repository == 'career-ops-hq/career-ops'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
